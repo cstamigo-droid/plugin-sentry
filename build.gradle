@@ -52,7 +52,7 @@ dependencies {
     compileOnly group: "io.kestra", name: "script", version: kestraVersion
 
     // Sentry
-    implementation "io.sentry:sentry:8.56.0"
+    implementation "io.sentry:sentry:8.58.0"
 }
 
 
