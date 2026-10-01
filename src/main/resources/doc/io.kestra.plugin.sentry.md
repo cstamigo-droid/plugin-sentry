@@ -6,6 +6,8 @@ Capture errors and send execution summaries to Sentry from Kestra flows.
 
 Set `dsn` to your Sentry project's DSN (found in Settings → Projects → Client Keys). Store it in a [secret](https://kestra.io/docs/concepts/secret).
 
+Any DSN in the `{PROTOCOL}://{PUBLIC_KEY}[:{SECRET_KEY}]@{HOST}{PATH}/{PROJECT_ID}` format works, from sentry.io or a self-hosted Sentry (a path prefix and a port are kept). Only the public key is put in the ingest URL. A DSN with a public key that cannot be parsed fails the task with an `Invalid Sentry DSN` error.
+
 ## Tasks
 
 `SentryAlert` sends an event to Sentry as a step within a flow — set `payload` to a JSON body in the Sentry event format, or omit it to send a default alert. Set `endpointType` to `ENVELOPE` (the default) or `STORE` to match your Sentry SDK configuration.

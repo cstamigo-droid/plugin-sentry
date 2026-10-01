@@ -60,7 +60,7 @@ import static java.nio.charset.StandardCharsets.UTF_8;
                 errors:
                   - id: alert_on_failure
                     type: io.kestra.plugin.sentry.SentryAlert
-                    dsn: "{{ secret('SENTRY_DSN') }}" # format: https://xxx@xxx.ingest.sentry.io/xxx
+                    dsn: "{{ secret('SENTRY_DSN') }}" # format: https://{PUBLIC_KEY}@{HOST}/{PROJECT_ID}
                     endpointType: STORE   # use STORE if ENVELOPE is not enabled
                     options:
                       readTimeout: PT20S
@@ -106,6 +106,10 @@ public class SentryAlert extends AbstractSentryConnection {
     public static final String SENTRY_DATA_MODEL = "event";
     public static final String SENTRY_FILE_NAME = "application.log";
     public static final String SENTRY_CONTENT_TYPE = "application/json";
+    /**
+     * @deprecated no longer used: any DSN carrying a public key is now turned into its ingest URL.
+     */
+    @Deprecated
     public static final String SENTRY_DSN_REGEXP = "^(https?://[a-f0-9]+@o[0-9]+\\.ingest\\.sentry\\.io/[0-9]+)$";
     public static final int PAYLOAD_SIZE_THRESHOLD = 1024 * 1024; // 1MB for events
     public static final int ENVELOP_SIZE_THRESHOLD = 100 * 1024 * 1024; // 100MB decompressed
@@ -127,7 +131,7 @@ public class SentryAlert extends AbstractSentryConnection {
 
     @Schema(
         title = "Sentry DSN",
-        description = "Project DSN used to authenticate requests; keep in secrets and follow Sentry DSN format."
+        description = "Project DSN used to authenticate requests, in the Sentry DSN format `{PROTOCOL}://{PUBLIC_KEY}[:{SECRET_KEY}]@{HOST}{PATH}/{PROJECT_ID}`, from sentry.io or a self-hosted Sentry; the ingest URL is derived from it. A value without a public key is used as the ingest URL as is. Keep it in secrets."
     )
     @PluginProperty(dynamic = true, group = "main", secret = true)
     @ToString.Exclude
@@ -151,10 +155,10 @@ public class SentryAlert extends AbstractSentryConnection {
 
     @Override
     public VoidOutput run(RunContext runContext) throws Exception {
-        String dsn = runContext.render(this.dsn);
+        String dsn = runContext.render(this.dsn).trim();
 
         String url = dsn;
-        if (dsn.matches(SENTRY_DSN_REGEXP)) {
+        if (EndpointType.isDsn(dsn)) {
             /*
              * To make passing the correct API endpoint URL easier,
              * users only need to provide the Sentry DSN, and we parse the required attributes for the URL
