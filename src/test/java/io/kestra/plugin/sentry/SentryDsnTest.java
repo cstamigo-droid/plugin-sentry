@@ -3,6 +3,8 @@ package io.kestra.plugin.sentry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Execution;
+import org.junit.jupiter.api.parallel.ExecutionMode;
 
 import io.kestra.core.junit.annotations.KestraTest;
 import io.kestra.core.models.property.Property;
@@ -20,10 +22,9 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-/**
- * DSNs other than the {@code https://key@oN.ingest.sentry.io/N} shape used to be posted as-is, userinfo included.
- */
+// FakeSentryIngestController records into static fields, so these tests must not run in parallel
 @KestraTest
+@Execution(ExecutionMode.SAME_THREAD)
 class SentryDsnTest {
     private static final String PUBLIC_KEY = "0123456789abcdef0123456789abcdef";
     private static final String SECRET_KEY = "fedcba9876543210fedcba9876543210";
@@ -38,20 +39,25 @@ class SentryDsnTest {
 
     @BeforeEach
     void startServer() {
-        EmbeddedServer server = applicationContext.getBean(EmbeddedServer.class);
+        var server = applicationContext.getBean(EmbeddedServer.class);
         server.start();
         hostPort = server.getURI().getHost() + ":" + server.getURI().getPort();
         FakeSentryIngestController.path = null;
         FakeSentryIngestController.sentryKey = null;
+        FakeSentryIngestController.body = null;
     }
 
     private void send(String dsn) throws Exception {
+        send(dsn, "{\"message\":{\"message\":\"Execution failed\"}}");
+    }
+
+    private void send(String dsn, String payload) throws Exception {
         SentryAlert.builder()
             .id(IdUtils.create())
             .type(SentryAlert.class.getName())
             .dsn(dsn)
             .endpointType(EndpointType.ENVELOPE)
-            .payload(Property.ofValue("{\"message\":{\"message\":\"Execution failed\"}}"))
+            .payload(Property.ofValue(payload))
             .build()
             .run(runContextFactory.of());
     }
@@ -120,19 +126,69 @@ class SentryDsnTest {
         String[] invalidDsns = {
             "http://" + PUBLIC_KEY + ":" + SECRET_KEY + "@sentry_web/42", // host that URI cannot parse
             "http://" + PUBLIC_KEY + ":" + SECRET_KEY + "@x@" + hostPort + "/42", // unencoded @ in the secret key
-            "http://" + PUBLIC_KEY + ":" + SECRET_KEY + "/x@" + hostPort + "/42", // unencoded / in the secret key
             "http://" + PUBLIC_KEY + ":" + SECRET_KEY + "@" + hostPort + "/api/42/envelope/", // an ingest URL, not a DSN
             "http://:" + SECRET_KEY + "@" + hostPort + "/42", // no public key
             "http://" + PUBLIC_KEY + ":" + SECRET_KEY + "@" + hostPort + "/", // no project id
             "http://" + PUBLIC_KEY + ":" + SECRET_KEY + "@" + hostPort + "/4 2" // not a URI
         };
 
-        for (String dsn : invalidDsns) {
-            IllegalArgumentException exception = assertThrows(IllegalArgumentException.class, () -> send(dsn), dsn);
+        for (var dsn : invalidDsns) {
+            var exception = assertThrows(IllegalArgumentException.class, () -> send(dsn), dsn);
 
             assertThat(dsn, exception.getMessage(), startsWith("Invalid Sentry DSN"));
             assertThat(dsn, exception.getMessage(), not(containsString(SECRET_KEY)));
             assertThat(dsn, exception.getCause(), is((Throwable) null));
         }
+    }
+
+    @Test
+    @DisplayName("The secret key is not sent in the envelope, whichever builder writes it")
+    void secretKeyIsNotInTheEnvelope() throws Exception {
+        var dsn = "http://" + PUBLIC_KEY + ":" + SECRET_KEY + "@" + hostPort + "/42";
+
+        // a bare string message is written by the legacy builder, which puts the DSN in the envelope header
+        send(dsn, "{\"message\":\"just a string\"}");
+        assertThat(FakeSentryIngestController.body, containsString("\"dsn\":\"http://" + PUBLIC_KEY + "@" + hostPort + "/42\""));
+        assertThat(FakeSentryIngestController.body, not(containsString(SECRET_KEY)));
+
+        send(dsn);
+        assertThat(FakeSentryIngestController.body, containsString("sentry.java"));
+        assertThat(FakeSentryIngestController.body, not(containsString(SECRET_KEY)));
+    }
+
+    @Test
+    @DisplayName("An encoded colon between the keys still keeps the secret key out of the request")
+    void encodedColonInUserinfo() throws Exception {
+        send("http://" + PUBLIC_KEY + "%3A" + SECRET_KEY + "@" + hostPort + "/42");
+
+        assertThat(FakeSentryIngestController.sentryKey, is(PUBLIC_KEY));
+        assertThat(FakeSentryIngestController.body, not(containsString(SECRET_KEY)));
+    }
+
+    @Test
+    @DisplayName("A secret key with an unencoded / is not read as a DSN, and the failure does not repeat it")
+    void unencodedSlashInTheSecretKey() {
+        var exception = assertThrows(Exception.class, () -> send("http://" + PUBLIC_KEY + ":" + SECRET_KEY + "/x@" + hostPort + "/42"));
+
+        assertThat(exception.getMessage(), not(containsString(SECRET_KEY)));
+    }
+
+    @Test
+    @DisplayName("An @ in the path of an ingest URL does not make it a DSN")
+    void atSignInThePathIsNotUserinfo() {
+        assertThat(EndpointType.isDsn("https://relay/api/1/envelope/@x"), is(false));
+        assertThat(EndpointType.isDsn("https://" + PUBLIC_KEY + "@relay/1"), is(true));
+    }
+
+    @Test
+    @DisplayName("Trailing slash, uppercase scheme, port, path prefix and IPv6 host all map to the ingest URL")
+    void ingestUrlEdgeCases() {
+        var query = "?sentry_version=7&sentry_client=java&sentry_key=" + PUBLIC_KEY;
+
+        assertThat(EndpointType.ENVELOPE.getEnvelopeUrl("https://" + PUBLIC_KEY + "@sentry.example.com/42/"), is("https://sentry.example.com/api/42/envelope/" + query));
+        assertThat(EndpointType.ENVELOPE.getEnvelopeUrl("HTTPS://" + PUBLIC_KEY + "@sentry.example.com/42"), is("https://sentry.example.com/api/42/envelope/" + query));
+        assertThat(EndpointType.ENVELOPE.getEnvelopeUrl("https://" + PUBLIC_KEY + "@sentry.example.com:9000/sentry/42"), is("https://sentry.example.com:9000/sentry/api/42/envelope/" + query));
+        assertThat(EndpointType.ENVELOPE.getEnvelopeUrl("http://" + PUBLIC_KEY + "@[::1]:9000/42"), is("http://[::1]:9000/api/42/envelope/" + query));
+        assertThat(EndpointType.STORE.getEnvelopeUrl("https://" + PUBLIC_KEY + "@sentry.example.com/sentry/42"), is("https://sentry.example.com/sentry/api/42/store/" + query));
     }
 }
