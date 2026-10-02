@@ -36,17 +36,18 @@ public enum EndpointType {
     public static final String SENTRY_ENVELOPE_URL_TEMPLATE = "%s://%s/api/%s/envelope/?sentry_version=%s&sentry_client=%s&sentry_key=%s";
 
     private static final Pattern DSN_WITH_USERINFO = Pattern.compile("^(?i:https?)://[^/?#]*@");
+    private static final Pattern PUBLIC_KEY = Pattern.compile("[A-Za-z0-9._~-]+");
+    private static final Pattern REPEATED_SLASHES = Pattern.compile("/{2,}");
+    private static final Pattern TRAILING_SLASHES = Pattern.compile("/+$");
     private static final Pattern INGEST_ENDPOINT_PATH = Pattern.compile(".*/api/[^/]+/(envelope|store)/?$");
     private static final String EXPECTED_FORMAT = "Expected {PROTOCOL}://{PUBLIC_KEY}@{HOST}{PATH}/{PROJECT_ID}.";
 
     public abstract String getEnvelopeUrl(String dsn);
 
-    /** A value without userinfo is not a DSN but the ingest URL itself. */
     static boolean isDsn(String value) {
         return value != null && DSN_WITH_USERINFO.matcher(value).find();
     }
 
-    /** The DSN without its secret key, to be sent where the whole DSN is expected. */
     static String withoutSecretKey(String dsn) {
         if (!isDsn(dsn)) {
             return dsn;
@@ -85,8 +86,13 @@ public enum EndpointType {
         if (publicKey.isEmpty()) {
             throw new IllegalArgumentException("Invalid Sentry DSN: a public key is required. " + EXPECTED_FORMAT);
         }
+        // getUserInfo() is decoded, so a key such as abc%26x%3D1 would add parameters to the query string
+        if (!PUBLIC_KEY.matcher(publicKey).matches()) {
+            throw new IllegalArgumentException("Invalid Sentry DSN: the public key may only contain letters, digits, '.', '_', '~' and '-'. " + EXPECTED_FORMAT);
+        }
 
-        var path = uri.getRawPath() == null ? "" : uri.getRawPath().replaceAll("/{2,}", "/").replaceAll("/+$", "");
+        var path = uri.getRawPath() == null ? "" : REPEATED_SLASHES.matcher(uri.getRawPath()).replaceAll("/");
+        path = TRAILING_SLASHES.matcher(path).replaceAll("");
         if (INGEST_ENDPOINT_PATH.matcher(path).matches()) {
             throw new IllegalArgumentException("Invalid Sentry DSN: it is an ingest endpoint URL, not a DSN. " + EXPECTED_FORMAT);
         }

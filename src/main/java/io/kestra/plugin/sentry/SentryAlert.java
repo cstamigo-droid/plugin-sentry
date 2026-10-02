@@ -183,7 +183,7 @@ public class SentryAlert extends AbstractSentryConnection {
 
             // Trying to send to /envelope endpoint
             try {
-                runContext.logger().debug("Attempting to send the following Sentry event envelope: {}", redactDsn(envelope, dsn));
+                runContext.logger().debug("Attempting to send the following Sentry event envelope: {}", redactDsn(redactDsn(envelope, dsn), EndpointType.withoutSecretKey(dsn)));
                 var requestBuilder = createRequestBuilder(runContext)
                     .addHeader("Content-Type", "application/json")
                     .uri(URI.create(url))

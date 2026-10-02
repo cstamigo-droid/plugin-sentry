@@ -8,9 +8,14 @@ import org.junit.jupiter.api.parallel.ExecutionMode;
 
 import io.kestra.core.junit.annotations.KestraTest;
 import io.kestra.core.models.property.Property;
+import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.RunContextFactory;
 import io.kestra.core.utils.IdUtils;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import io.micronaut.context.ApplicationContext;
 import io.micronaut.runtime.server.EmbeddedServer;
 import jakarta.inject.Inject;
@@ -52,6 +57,10 @@ class SentryDsnTest {
     }
 
     private void send(String dsn, String payload) throws Exception {
+        send(dsn, payload, runContextFactory.of());
+    }
+
+    private void send(String dsn, String payload, RunContext runContext) throws Exception {
         SentryAlert.builder()
             .id(IdUtils.create())
             .type(SentryAlert.class.getName())
@@ -59,7 +68,7 @@ class SentryDsnTest {
             .endpointType(EndpointType.ENVELOPE)
             .payload(Property.ofValue(payload))
             .build()
-            .run(runContextFactory.of());
+            .run(runContext);
     }
 
     @Test
@@ -190,5 +199,57 @@ class SentryDsnTest {
         assertThat(EndpointType.ENVELOPE.getEnvelopeUrl("https://" + PUBLIC_KEY + "@sentry.example.com:9000/sentry/42"), is("https://sentry.example.com:9000/sentry/api/42/envelope/" + query));
         assertThat(EndpointType.ENVELOPE.getEnvelopeUrl("http://" + PUBLIC_KEY + "@[::1]:9000/42"), is("http://[::1]:9000/api/42/envelope/" + query));
         assertThat(EndpointType.STORE.getEnvelopeUrl("https://" + PUBLIC_KEY + "@sentry.example.com/sentry/42"), is("https://sentry.example.com/sentry/api/42/store/" + query));
+    }
+
+    @Test
+    @DisplayName("A public key that would need percent-encoding in the query string is rejected as an invalid DSN")
+    void keyThatWouldInjectQueryParameters() {
+        String[] invalidDsns = {
+            "https://abc%26sentry_version%3D1@sentry.example.com/42", // & and = once decoded
+            "https://abc%26sentry_version%3D1:" + SECRET_KEY + "@sentry.example.com/42",
+            "https://abc%23x@sentry.example.com/42" // # once decoded
+        };
+
+        for (var dsn : invalidDsns) {
+            var exception = assertThrows(IllegalArgumentException.class, () -> EndpointType.ENVELOPE.getEnvelopeUrl(dsn), dsn);
+            assertThat(dsn, exception.getMessage(), startsWith("Invalid Sentry DSN"));
+
+            exception = assertThrows(IllegalArgumentException.class, () -> EndpointType.withoutSecretKey(dsn), dsn);
+            assertThat(dsn, exception.getMessage(), startsWith("Invalid Sentry DSN"));
+        }
+    }
+
+    @Test
+    @DisplayName("The DEBUG envelope log redacts the DSN without its secret key")
+    void debugLogRedactsTheDsnWithoutTheSecretKey() throws Exception {
+        var runContext = runContextFactory.of();
+        var logger = (Logger) runContext.logger();
+        var appender = new ListAppender<ILoggingEvent>();
+        appender.start();
+        logger.addAppender(appender);
+        var previousLevel = logger.getLevel();
+        logger.setLevel(Level.DEBUG);
+
+        var dsn = "http://" + PUBLIC_KEY + ":" + SECRET_KEY + "@" + hostPort + "/42";
+        try {
+            // a bare string message is written by the legacy builder, which puts the DSN without the secret key in the header
+            send(dsn, "{\"message\":\"just a string\"}", runContext);
+            // a structured message is written by the SDK, whose header carries no DSN
+            send(dsn, "{\"message\":{\"message\":\"Execution failed\"}}", runContext);
+        } finally {
+            logger.detachAppender(appender);
+            logger.setLevel(previousLevel);
+        }
+
+        var envelopeLogs = appender.list.stream()
+            .map(ILoggingEvent::getFormattedMessage)
+            .filter(message -> message.startsWith("Attempting to send"))
+            .toList();
+        assertThat(envelopeLogs.size(), is(2));
+        assertThat(envelopeLogs.getFirst(), containsString("***REDACTED***"));
+        for (var log : envelopeLogs) {
+            assertThat(log, not(containsString(PUBLIC_KEY)));
+            assertThat(log, not(containsString(SECRET_KEY)));
+        }
     }
 }
