@@ -285,7 +285,8 @@ public class SentryAlert extends AbstractSentryConnection {
      * Helper method to build the envelope by hand, for payloads the SDK cannot model.
      */
     private static String legacyEnvelope(String eventId, String payload, String dsn) {
-        return "%s%n%s%n%s%n".formatted(getEnvelopeHeaders(eventId, dsn), getItemHeaders(payload.length()), payload);
+        // Sentry reads `length` UTF-8 bytes, then expects a lone \n whatever the worker's OS line separator is
+        return "%s\n%s\n%s\n".formatted(getEnvelopeHeaders(eventId, dsn), getItemHeaders(payload.getBytes(UTF_8).length), payload);
     }
 
     /**
@@ -300,8 +301,8 @@ public class SentryAlert extends AbstractSentryConnection {
     /**
      * Helper method to build item headers
      */
-    private static String getItemHeaders(int payloadLength) {
-        return "{\"type\":\"%s\",\"length\":%d,\"content_type\":\"%s\",\"filename\":\"%s\"}".formatted(SENTRY_DATA_MODEL, payloadLength, SENTRY_CONTENT_TYPE, SENTRY_FILE_NAME);
+    private static String getItemHeaders(int payloadByteLength) {
+        return "{\"type\":\"%s\",\"length\":%d,\"content_type\":\"%s\",\"filename\":\"%s\"}".formatted(SENTRY_DATA_MODEL, payloadByteLength, SENTRY_CONTENT_TYPE, SENTRY_FILE_NAME);
     }
 
     /**

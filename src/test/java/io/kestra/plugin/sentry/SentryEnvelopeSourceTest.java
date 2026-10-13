@@ -8,14 +8,17 @@ import org.junit.jupiter.api.Test;
 import io.kestra.core.junit.annotations.KestraTest;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.runners.RunContextFactory;
+import io.kestra.core.serializers.JacksonMapper;
 import io.kestra.core.utils.IdUtils;
 
 import io.micronaut.context.ApplicationContext;
 import io.micronaut.runtime.server.EmbeddedServer;
 import jakarta.inject.Inject;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
 
@@ -75,6 +78,29 @@ class SentryEnvelopeSourceTest {
     }
 
     @Test
+    @DisplayName("The legacy envelope declares the payload length in UTF-8 bytes")
+    void shouldDeclareLengthInUtf8BytesWhenPayloadHasNonAsciiText() throws Exception {
+        // accents and an emoji take more UTF-8 bytes than Java chars, a char count makes Sentry answer 400
+        var payload = "{\"message\":\"Ejecución fallida en ñandú 🚀\"}";
+
+        var body = send(payload);
+
+        assertThat(readItemPayload(body), is(payload));
+    }
+
+    @Test
+    @DisplayName("The legacy envelope separates its lines with a lone \\n on every OS")
+    void shouldSeparateLinesWithLineFeedWhenEnvelopeIsBuiltByHand() throws Exception {
+        var payload = "{\"message\":\"just a string\"}";
+
+        var body = send(payload);
+
+        // a Windows line separator (\r\n) makes Sentry answer 400 "missing newline after header or payload"
+        assertThat(body, not(containsString("\r")));
+        assertThat(readItemPayload(body), is(payload));
+    }
+
+    @Test
     @DisplayName("A well formed eventId is carried by the SDK envelope")
     void sdkEnvelopeCarriesAWellFormedEventId() throws Exception {
         var eventId = "fc6d8c0c43fc4630ad850ee518f1b9d0";
@@ -93,5 +119,32 @@ class SentryEnvelopeSourceTest {
 
         assertThat(body, containsString("not-a-valid-sentry-id"));
         assertThat(body, containsString("\"name\":\"java\""));
+    }
+
+    /**
+     * Reads the single item of an envelope the way Sentry does: two header lines ended by \n,
+     * then exactly `length` bytes of payload, requiring the trailing \n this envelope always writes.
+     */
+    private static String readItemPayload(String envelope) throws Exception {
+        var bytes = envelope.getBytes(UTF_8);
+        var envelopeHeaderEnd = indexOf(bytes, 0);
+        var itemHeaderEnd = indexOf(bytes, envelopeHeaderEnd + 1);
+        var itemHeader = new String(bytes, envelopeHeaderEnd + 1, itemHeaderEnd - envelopeHeaderEnd - 1, UTF_8);
+
+        var length = JacksonMapper.ofJson().readTree(itemHeader).get("length").asInt();
+        var payloadStart = itemHeaderEnd + 1;
+        assertThat("envelope ends before the declared length", payloadStart + length < bytes.length, is(true));
+        assertThat("payload must be followed by \\n", bytes[payloadStart + length], is((byte) '\n'));
+
+        return new String(bytes, payloadStart, length, UTF_8);
+    }
+
+    private static int indexOf(byte[] bytes, int from) {
+        for (var i = from; i < bytes.length; i++) {
+            if (bytes[i] == '\n') {
+                return i;
+            }
+        }
+        throw new AssertionError("no \\n after byte " + from);
     }
 }
